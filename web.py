@@ -23,7 +23,7 @@ mail = Mail(app)
 
 import mysql.connector
 
-connection=mysql.connector.connect(host="localhost",user="root",password="Ganesh@123",database="Railway")
+connection=mysql.connector.connect(host="localhost",user="root",password="Put ur passsword here",database="Railway")
 cursor=connection.cursor(buffered=True)
 
 @app.route("/")
