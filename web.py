@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session
 from flask_mysqldb import MySQL
 import MySQLdb.cursors
-from datetime import datetime,time
+from datetime import datetime,time,timedelta
 import calendar
 from flask_mail import Mail,Message
 
@@ -23,8 +23,59 @@ mail = Mail(app)
 
 import mysql.connector
 
-connection=mysql.connector.connect(host="localhost",user="root",password="Ganesh@123",database="Railway")
-cursor=connection.cursor(buffered=True)
+class ConnectionProxy:
+    def __init__(self):
+        self._conn = None
+
+    def _get_conn(self):
+        if self._conn is None:
+            self._conn = mysql.connector.connect(host="localhost",user="root",password="Ganesh@123",database="Railway")
+        else:
+            try:
+                self._conn.ping(reconnect=True, attempts=3, delay=2)
+            except Exception:
+                self._conn = mysql.connector.connect(host="localhost",user="root",password="Ganesh@123",database="Railway")
+        return self._conn
+
+    def commit(self):
+        self._get_conn().commit()
+
+    def rollback(self):
+        self._get_conn().rollback()
+
+    def cursor(self, *args, **kwargs):
+        return self._get_conn().cursor(*args, **kwargs)
+
+class CursorProxy:
+    def __init__(self, conn_proxy):
+        self.conn_proxy = conn_proxy
+        self._cursor = None
+
+    def _get_cursor(self):
+        try:
+            from flask import has_request_context, g
+            if has_request_context():
+                if 'db_cursor' not in g:
+                    db = self.conn_proxy._get_conn()
+                    g.db_cursor = db.cursor(buffered=True)
+                return g.db_cursor
+        except Exception:
+            pass
+        if self._cursor is None:
+            self._cursor = self.conn_proxy._get_conn().cursor(buffered=True)
+        return self._cursor
+
+    def execute(self, *args, **kwargs):
+        return self._get_cursor().execute(*args, **kwargs)
+
+    def fetchall(self, *args, **kwargs):
+        return self._get_cursor().fetchall(*args, **kwargs)
+
+    def fetchone(self, *args, **kwargs):
+        return self._get_cursor().fetchone(*args, **kwargs)
+
+connection = ConnectionProxy()
+cursor = CursorProxy(connection)
 
 @app.route("/")
 def homepage():
@@ -128,35 +179,49 @@ def runningstatus():
 
 @app.route('/runningstatus1',methods=["post"])
 def runningstatus1():
-    Trainno = request.form['running']
-    Date = request.form['Date']
+    Trainno = request.form.get('running')
+    Date = request.form.get('Date')
+    if not Date:
+        return render_template("runningstatus.html", notrunning="Please select a valid date.")
+    if not Trainno:
+        return render_template("runningstatus.html", notrunning="Please enter a valid train number.")
+    
     Date1=Date.replace("-",":")
-    Date=Date.split("-")
-    a=int(Date[0])
-    b=int(Date[1])
-    c=int(Date[2])
-    d = datetime(a,b,c).weekday()
+    Date_parts=Date.split("-")
+    if len(Date_parts) < 3:
+        return render_template("runningstatus.html", notrunning="Please enter a date in YYYY-MM-DD format.")
+        
+    try:
+        a=int(Date_parts[0])
+        b=int(Date_parts[1])
+        c=int(Date_parts[2])
+        d = datetime(a,b,c).weekday()
+    except ValueError:
+        return render_template("runningstatus.html", notrunning="Invalid date components.")
+        
     lst = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     day=lst[d]
-    c=datetime.now()
-    time=c.strftime("%H:%M:%S")
-    date=c.strftime("%Y:%m:%d")
+    c_now=datetime.now()
+    time_now=c_now.strftime("%H:%M:%S")
+    date_now=c_now.strftime("%Y:%m:%d")
     date_format = "%Y:%m:%d"
     a = datetime.strptime(Date1, date_format)
-    b = datetime.strptime(date, date_format)
+    b = datetime.strptime(date_now, date_format)
     delta=b-a
     difference=delta.days
     cursor.execute("select * from traindetails where {}=1 and trainno='{}'".format(day,Trainno))
     x=cursor.fetchall()
-    if len(x)>0 and date==Date1:
+    if len(x)>0 and date_now==Date1:
         cursor.execute("select Depttime from route where trainno='{}' and stopnumber=1".format(Trainno))
         m=cursor.fetchall()
+        if not m:
+            return render_template("runningstatus.html", notrunning="Route details not found for this train.")
         time1=m[0][0]
-        cursor.execute("select Deptstation,Depttime,Arrivalstation,Arrivaltime from route where trainno='{}' and depttime<='{}' and arrivaltime>='{}' and depttime>='{}'".format(Trainno,time,time,time1))
+        cursor.execute("select Deptstation,Depttime,Arrivalstation,Arrivaltime from route where trainno='{}' and depttime<='{}' and arrivaltime>='{}' and depttime>='{}'".format(Trainno,time_now,time_now,time1))
         z=cursor.fetchall()
-        cursor.execute("select Startstation from traindetails where trainno='{}' and starttime>'{}'".format(Trainno,time))
+        cursor.execute("select Startstation from traindetails where trainno='{}' and starttime>'{}'".format(Trainno,time_now))
         y=cursor.fetchall()
-        cursor.execute("select Endstation from traindetails where trainno='{}' and endtime<'{}'".format(Trainno,time))
+        cursor.execute("select Endstation from traindetails where trainno='{}' and endtime<'{}'".format(Trainno,time_now))
         x=cursor.fetchall()
         if len(z)>0:
             return render_template("runningstatus.html",status=z)
@@ -164,18 +229,18 @@ def runningstatus1():
             return render_template("runningstatus.html",notrunning="Train didn't start yet.")
         elif len(x)>0:
             return render_template("runningstatus.html",notrunning="Train completed its journey.")
-    elif len(x)>0 and date>Date1:
-        print(time)
-        cursor.execute("select Deptstation,Depttime,Deptday,Arrivalstation,Arrivaltime,Arrivalday from route where trainno='{}' and depttime<='{}' and arrivaltime>='{}' ".format(Trainno,time,time))
+        else:
+            return render_template("runningstatus.html",notrunning="Train status unknown for the current time.")
+    elif len(x)>0 and date_now>Date1:
+        cursor.execute("select Deptstation,Depttime,Deptday,Arrivalstation,Arrivaltime,Arrivalday from route where trainno='{}' and depttime<='{}' and arrivaltime>='{}' ".format(Trainno,time_now,time_now))
         z=cursor.fetchall()
-        print(z)
         if (z==[]):
             return render_template("runningstatus.html",notrunning="Train completed its journey.")
         elif (z[0][5]-1>=difference and (z[0][5]-z[0][2])>=0):
             return render_template("runningstatus.html",status1=z)   
         else:  
             return render_template("runningstatus.html",notrunning="Train completed its journey.")   
-    elif len(x)>0 and date<Date1:  
+    elif len(x)>0 and date_now<Date1:  
         return render_template("runningstatus.html",notrunning="The day didn't arrive.")     
     else:
         return render_template("runningstatus.html",notrunning="Train is not running on this day.")
@@ -376,7 +441,9 @@ def npass1():
     c=request.form["tickets"]
     session['ticketno'] = c
     c=int(c)
-    trainno = session.get('trainno',int)
+    trainno = session.get('trainno')
+    if trainno is None:
+        return redirect(url_for('homepage'))
     trainno=int(float(trainno))
     cursor.execute("""select Traincategory from traindetails where trainno='{}'""".format(trainno))
     z=cursor.fetchall()
@@ -387,13 +454,19 @@ def npass1():
 
 @app.route("/passengers", methods = ['GET','POST'])
 def passengers():
-        trainno = session.get('trainno',int)
+        trainno = session.get('trainno')
+        if trainno is None:
+            return redirect(url_for('homepage'))
         trainno=int(float(trainno))
-        price= session.get('price',int)
+        price= session.get('price')
+        if price is None:
+            return redirect(url_for('homepage'))
         price=int(float(price))
-        ticketno= session.get('ticketno',int)
+        ticketno= session.get('ticketno')
+        if ticketno is None:
+            return redirect(url_for('homepage'))
         ticketno=int(ticketno)
-        foodtype= session.get('food',str)
+        foodtype= session.get('food','')
         startstation = session.get('startstation',None)
         endstation = session.get('endstation',None)
         date = session.get('date',None)
@@ -403,15 +476,8 @@ def passengers():
         type = session.get('type',None)
         ID = session.get('ID',None)
 
-        if category == "CC":
-            Nseats = int(seats)
-        elif category == "3A":
-            Nseats = int(seats)
-        elif category == "2A":
-            Nseats = int(seats)
-        elif category == "1A":
-            Nseats = int(seats)
-        elif category == "SL":
+        Nseats = 0
+        if seats is not None:
             Nseats = int(seats)
         price=price*(ticketno)
 
@@ -441,9 +507,13 @@ def passengers():
             sex_l.append(sex)
             food  = request.form[t]
             food_l.append(food)
-            seats = int(seats)
-            seatno.append(seats)
-            seats = seats - 1
+            if seats is not None:
+                current_seats_val = int(seats)
+                seatno.append(current_seats_val)
+                seats = current_seats_val - 1
+            else:
+                seatno.append(0)
+
         cursor.execute("""select * from foodservice where foodservicetype='{}'""".format(foodtype))
         h=cursor.fetchall()
 
@@ -452,121 +522,141 @@ def passengers():
         snack = time(hour=17,minute=0,second=0)
         dinner = time(hour=20,minute=30,second=0)
 
-        for i in range(len(food_l)):
-            if food_l[i]=="Veg":
-                cursor.execute("""select * from route where trainno='{}' and (Deptstation='{}' or Arrivalstation='{}')""".format(trainno,startstation,endstation))
-                m=cursor.fetchall()
-                print(m)
-                depttime=m[0][3]
-                deptday=m[0][4]
-                arrivaltime=m[1][6]
-                arrivalday=m[1][7]
-
-                depttime = (datetime.min + depttime).time()
-                arrivaltime = (datetime.min + arrivaltime).time()
-
-                if (deptday==arrivalday):
-                    if (depttime<bf and arrivaltime>bf):
-                        price=price+h[0][2]
-                    if (depttime<lunch and arrivaltime>lunch):
-                        price=price+h[0][4]
-                    if (depttime<snack and arrivaltime>snack):
-                        price=price+h[0][6]
-                    if (depttime<dinner and arrivaltime>dinner):
-                        price=price+h[0][7]
-                elif (deptday==arrivalday-1):
-                    if (depttime<bf):
-                        price=price+h[0][2]
-                    if (depttime<lunch):
-                        price=price+h[0][4]
-                    if (depttime<snack):
-                        price=price+h[0][6]
-                    if (depttime<dinner):
-                        price=price+h[0][7]
-                    if (arrivaltime>bf):
-                        price=price+h[0][2]
-                    if (arrivaltime>lunch):
-                        price=price+h[0][4]
-                    if (arrivaltime>snack):
-                        price=price+h[0][6]
-                    if (arrivaltime>dinner):
-                        price=price+h[0][7]
-                elif (deptday==arrivalday-2):
-                    price=price+h[0][2]+h[0][4]+h[0][6]+h[0][7]
-                    if (depttime<bf):
-                        price=price+h[0][2]
-                    if (depttime<lunch):
-                        price=price+h[0][4]
-                    if (depttime<snack):
-                        price=price+h[0][6]
-                    if (depttime<dinner):
-                        price=price+h[0][7]
-                    if (arrivaltime>bf):
-                        price=price+h[0][2]
-                    if (arrivaltime>lunch):
-                        price=price+h[0][4]
-                    if (arrivaltime>snack):
-                        price=price+h[0][6]
-                    if (arrivaltime>dinner):
-                        price=price+h[0][7]
-
-            if food_l[i]=="NVeg":
-                cursor.execute("""select * from route where trainno='{}' and (Deptstation='{}' or Arrivalstation='{}')""".format(trainno,startstation,endstation))
-                m=cursor.fetchall()
-                depttime=m[0][3]
-                deptday=m[0][4]
-                arrivaltime=m[1][6]
-                arrivalday=m[1][7]
-
-                depttime = (datetime.min + depttime).time()
-                arrivaltime = (datetime.min + arrivaltime).time()
-
-                if (deptday==arrivalday):
-                    if (depttime<bf and arrivaltime>bf):
-                        price=price+h[0][3]
-                    if (depttime<lunch and arrivaltime>lunch):
-                        price=price+h[0][5]
-                    if (depttime<snack and arrivaltime>snack):
-                        price=price+h[0][6]
-                    if (depttime<dinner and arrivaltime>dinner):
-                        price=price+h[0][8]
-                elif (deptday==arrivalday-1):
-                    if (depttime<bf):
-                        price=price+h[0][3]
-                    if (depttime<lunch):
-                        price=price+h[0][5]
-                    if (depttime<snack):
-                        price=price+h[0][6]
-                    if (depttime<dinner):
-                        price=price+h[0][8]
-                    if (arrivaltime>bf):
-                        price=price+h[0][3]
-                    if (arrivaltime>lunch):
-                        price=price+h[0][5]
-                    if (arrivaltime>snack):
-                        price=price+h[0][6]
-                    if (arrivaltime>dinner):
-                        price=price+h[0][8]
-                elif (deptday==arrivalday-2):
-                    price=price+h[0][3]+h[0][5]+h[0][6]+h[0][8]
-                    if (depttime<bf):
-                        price=price+h[0][3]
-                    if (depttime<lunch):
-                        price=price+h[0][5]
-                    if (depttime<snack):
-                        price=price+h[0][6]
-                    if (depttime<dinner):
-                        price=price+h[0][8]
-                    if (arrivaltime>bf):
-                        price=price+h[0][3]
-                    if (arrivaltime>lunch):
-                        price=price+h[0][5]
-                    if (arrivaltime>snack):
-                        price=price+h[0][6]
-                    if (arrivaltime>dinner):
-                        price=price+h[0][8]
+        # Query route information once outside the food loops
+        cursor.execute("""select * from route where trainno='{}' and (Deptstation='{}' or Arrivalstation='{}')""".format(trainno,startstation,endstation))
+        m=cursor.fetchall()
         
-        seats=[]
+        depttime_raw = None
+        deptday = 1
+        arrivaltime_raw = None
+        arrivalday = 1
+
+        if len(m) >= 2:
+            if m[0][2] == startstation:
+                depttime_raw = m[0][3]
+                deptday = m[0][4]
+                arrivaltime_raw = m[1][6]
+                arrivalday = m[1][7]
+            else:
+                depttime_raw = m[1][3]
+                deptday = m[1][4]
+                arrivaltime_raw = m[0][6]
+                arrivalday = m[0][7]
+        elif len(m) == 1:
+            depttime_raw = m[0][3]
+            deptday = m[0][4]
+            arrivaltime_raw = m[0][6]
+            arrivalday = m[0][7]
+        else:
+            depttime_raw = time(hour=0, minute=0, second=0)
+            arrivaltime_raw = time(hour=0, minute=0, second=0)
+
+        # Helper to convert timedelta or string to time object securely
+        def to_time_obj(t):
+            if isinstance(t, time):
+                return t
+            if hasattr(t, 'total_seconds'): # timedelta
+                return (datetime.min + t).time()
+            return t
+
+        depttime = to_time_obj(depttime_raw)
+        arrivaltime = to_time_obj(arrivaltime_raw)
+
+        if len(h) > 0:
+            for i in range(len(food_l)):
+                if food_l[i]=="Veg":
+                    if (deptday==arrivalday):
+                        if (depttime<bf and arrivaltime>bf):
+                            price=price+h[0][2]
+                        if (depttime<lunch and arrivaltime>lunch):
+                            price=price+h[0][4]
+                        if (depttime<snack and arrivaltime>snack):
+                            price=price+h[0][6]
+                        if (depttime<dinner and arrivaltime>dinner):
+                            price=price+h[0][7]
+                    elif (deptday==arrivalday-1):
+                        if (depttime<bf):
+                            price=price+h[0][2]
+                        if (depttime<lunch):
+                            price=price+h[0][4]
+                        if (depttime<snack):
+                            price=price+h[0][6]
+                        if (depttime<dinner):
+                            price=price+h[0][7]
+                        if (arrivaltime>bf):
+                            price=price+h[0][2]
+                        if (arrivaltime>lunch):
+                            price=price+h[0][4]
+                        if (arrivaltime>snack):
+                            price=price+h[0][6]
+                        if (arrivaltime>dinner):
+                            price=price+h[0][7]
+                    elif (deptday==arrivalday-2):
+                        price=price+h[0][2]+h[0][4]+h[0][6]+h[0][7]
+                        if (depttime<bf):
+                            price=price+h[0][2]
+                        if (depttime<lunch):
+                            price=price+h[0][4]
+                        if (depttime<snack):
+                            price=price+h[0][6]
+                        if (depttime<dinner):
+                            price=price+h[0][7]
+                        if (arrivaltime>bf):
+                            price=price+h[0][2]
+                        if (arrivaltime>lunch):
+                            price=price+h[0][4]
+                        if (arrivaltime>snack):
+                            price=price+h[0][6]
+                        if (arrivaltime>dinner):
+                            price=price+h[0][7]
+
+                if food_l[i]=="NVeg":
+                    if (deptday==arrivalday):
+                        if (depttime<bf and arrivaltime>bf):
+                            price=price+h[0][3]
+                        if (depttime<lunch and arrivaltime>lunch):
+                            price=price+h[0][5]
+                        if (depttime<snack and arrivaltime>snack):
+                            price=price+h[0][6]
+                        if (depttime<dinner and arrivaltime>dinner):
+                            price=price+h[0][8]
+                    elif (deptday==arrivalday-1):
+                        if (depttime<bf):
+                            price=price+h[0][3]
+                        if (depttime<lunch):
+                            price=price+h[0][5]
+                        if (depttime<snack):
+                            price=price+h[0][6]
+                        if (depttime<dinner):
+                            price=price+h[0][8]
+                        if (arrivaltime>bf):
+                            price=price+h[0][3]
+                        if (arrivaltime>lunch):
+                            price=price+h[0][5]
+                        if (arrivaltime>snack):
+                            price=price+h[0][6]
+                        if (arrivaltime>dinner):
+                            price=price+h[0][8]
+                    elif (deptday==arrivalday-2):
+                        price=price+h[0][3]+h[0][5]+h[0][6]+h[0][8]
+                        if (depttime<bf):
+                            price=price+h[0][3]
+                        if (depttime<lunch):
+                            price=price+h[0][5]
+                        if (depttime<snack):
+                            price=price+h[0][6]
+                        if (depttime<dinner):
+                            price=price+h[0][8]
+                        if (arrivaltime>bf):
+                            price=price+h[0][3]
+                        if (arrivaltime>lunch):
+                            price=price+h[0][5]
+                        if (arrivaltime>snack):
+                            price=price+h[0][6]
+                        if (arrivaltime>dinner):
+                            price=price+h[0][8]
+        
+        seats_list=[]
         id=[]
 
         cursor.execute("""select PNR from ticket""")
@@ -585,7 +675,7 @@ def passengers():
             cursor.execute("""select passengerId from passengerdetails where passengerid = (select max(passengerid) from passengerdetails where Id='{}')""".format(ID))
             f=cursor.fetchone()
             id.append(f[0])
-            seats.append(Nseats)
+            seats_list.append(Nseats)
             Nseats=Nseats-1
         if type == "General" and category == "CC":
             cursor.execute("""UPDATE Generalseatavailability SET CCseats = '{}' where trainno='{}' and date='{}'""".format(Nseats,trainno,date))
@@ -617,8 +707,8 @@ def passengers():
         if type == "Tatkal" and category == "1A":
             cursor.execute("""UPDATE Tatkalseatavailability SET 1Aseats = '{}' where trainno='{}' and date='{}'""".format(Nseats,trainno,date))
             connection.commit()
-        for i in range(len(seats)):
-            cursor.execute("""Insert into ticket values ('{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}')""".format(PNR,id[i],ID,category,type,trainno,"CNF",seats[i],startstation,depttime,endstation,arrivaltime,date,price))
+        for i in range(len(seats_list)):
+            cursor.execute("""Insert into ticket values ('{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}','{}')""".format(PNR,id[i],ID,category,type,trainno,"CNF",seats_list[i],startstation,depttime,endstation,arrivaltime,date,price))
             connection.commit()
         
         cursor.execute("""select * from userdetails where ID='{}'""".format(ID))
@@ -776,10 +866,14 @@ def cancel():
         Trainno = session.get('Trainno',None)
         Date = session.get('Date',None)
        
-        cursor.execute("UPDATE Ticket SET Status = '{}' WHERE PNR = '{}'".format("CXL",PNR))
-        connection.commit()
         if type == "Tatkal":
             msg = "Cancellation not allowed"
+            return render_template("pnr.html",msg=msg)
+
+        cursor.execute("UPDATE Ticket SET Status = '{}' WHERE PNR = '{}'".format("CXL",PNR))
+        connection.commit()
+        
+        msg = "Cancellation failed"
         if type == "General" and category == "CC":
             cursor.execute("SELECT CCseats from Generalseatavailability where trainno='{}' and date='{}'".format(Trainno,Date))
             Nseats = cursor.fetchall()
