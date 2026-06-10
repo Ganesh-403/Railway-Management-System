@@ -1,112 +1,90 @@
-# Railway Management System
+# RailExp - Modern Railway Management System
 
-The **Railway Management System** is a comprehensive web-based application designed to streamline and manage the essential functionalities of a railway system. This system facilitates user-friendly interactions for passengers, administrators, and other stakeholders, ensuring a seamless railway experience.
+**RailExp** is a fully modernized, high-performance, and visually premium Railway Management System. Re-engineered from a legacy Flask/HTML app into a modern multi-tier application, it features a **FastAPI** backend, a **Vite React + TailwindCSS** Single Page Application (SPA) frontend, and a containerized **Docker** setup.
 
 ---
 
 ## 🛠️ Features
 
-### User Features
-- **Passenger Registration and Login**: Secure registration and login for passengers.
-- **Ticket Booking**: Reserve tickets for train journeys.
-- **Ticket Cancellation**: Cancel existing reservations with ease.
-- **Search Trains**: Find trains by route, timing, or availability.
-- **Running Status**: Check the real-time status of trains.
-- **Travel Updates**: Stay updated with important travel notifications.
-- **Privacy Policy**: View the privacy and terms of service.
+### User Experience & Booking
+- **Interactive SVG Coach Seat Selector**: Visualizes a standard 40-seat coach map (divided into bays with Aisle separation). Checks seat occupancy in real-time from the database and disables occupied seats (red), allowing users to select exact seat numbers.
+- **Itemized Catering Menu**: Passengers can choose individual meal plans (Veg Thali, Non-Veg Thali, Snack Box, Beverage) with dynamic, real-time price calculations in the booking summary cart.
+- **Secure JWT Authentication & RBAC**: Fully-featured JWT tokens for login/auth sessions. Implements a hybrid Bcrypt checking mechanism ensuring compatibility with legacy database plain-text passwords.
+- **Ticket Bookings & Cancellation**: Confirms bookings, sends emails via non-blocking thread-pool `BackgroundTasks`, and reclaims general seats automatically on cancellation.
+- **Live Running Status**: Real-time status lookup identifying whether a train is running, crossed specific stations, completed, or not yet started.
 
-### Admin Features
-- **Admin Login**: Secure login for administrators.
-- **Passenger Management**: Access and manage passenger details.
-- **Train Management**: Add, update, or remove train schedules.
-- **Reports and Insights**: Generate reports for cancellations, bookings, and other activities.
+### Administrative Control
+- **Recharts Analytics Dashboard**: Rich data visualizations for administrators, including:
+  - *Daily Booking Revenue*: Interactive Line Chart.
+  - *Service Performance*: Bar Chart of booking counts by train.
+  - *Quota Split*: Pie Chart dividing General vs. Tatkal tickets.
+  - *Catering metrics*: Pie Chart breaking down catering preferences.
+- **Train Schedule CRUD Manager**: Create, Read, Update, and Delete train details (operating days, source/destination, halts, and departure/arrival times).
+- **Route Stop Builder**: Dynamic panels to add intermediate route stops for operating train schedules.
+- **Ticket Inventory Releases**: Set of admin options to release and copy seat tables for specific dates.
 
 ---
 
 ## 📂 Project Structure
 
-### **Frontend (HTML Templates)**
-The user interface is built with HTML and includes the following templates:
-- **Home Page** (`home.html`): Overview of the system.
-- **Login/Registration**: 
-  - `login.html`
-  - `registration1.html`, `registration2.html`, `registration3.html`
-- **Ticketing System**: 
-  - `ticket.html` (Booking)
-  - `cancel.html` (Cancellation)
-- **Admin Controls**: 
-  - `adminlogin.html`
-  - `adminrights.html`
-- **Passenger Details**: `passengers.html`
-- **Travel Updates and Running Status**: 
-  - `travelupdates.html`
-  - `runningstatus.html`
-- **Privacy and T&C**: 
-  - `privacypolicy.html`
-  - `t&c.html`
-
-### **Backend (Python)**
-- **`web.py`**: Backend logic to handle requests, manage user data, and process ticket bookings.
-
-### **Database**
-- **Schema**: `Railway.mwb`
-- **SQL Data**: `Railway_database.sql`
-  - Tables for passengers, tickets, train schedules, admins, etc.
-  - Preloaded data for testing and demonstration.
+- **[`backend/`](file:///d:/B.E.%20in%20CE/TE/TE%20Mini%20Project/Railway%20Management%20System/backend)**:
+  - `app/main.py`: REST API endpoints, JWT security layers, and core logic.
+  - `app/models.py`: SQLAlchemy database models (mapped to MySQL database tables).
+  - `app/schemas.py`: Pydantic schemas validating input payloads.
+  - `app/auth.py`: Token signing, decoding, and Hybrid Bcrypt validator.
+  - `alembic/`: Database schema migrations configuration.
+- **[`frontend/`](file:///d:/B.E.%20in%20CE/TE/TE%20Mini%20Project/Railway%20Management%20System/frontend)**:
+  - `src/App.jsx`: State-based client router, user state, and auth configurations.
+  - `src/pages/`: Page templates (Home, Login, AdminLogin, Register, Search, Booking, TicketView, Cancel, RunningStatus, AdminRights).
+  - `src/config.js` / `src/index.css`: API base endpoints and Tailwind design systems.
+- **[`legacy/`](file:///d:/B.E.%20in%20CE/TE/TE%20Mini%20Project/Railway%20Management%20System/legacy)**: Holds the historical Flask backend (`web.py`) and raw HTML templates directory for reference.
+- **[`docker-compose.yml`](file:///d:/B.E.%20in%20CE/TE/TE%20Mini%20Project/Railway%20Management%20System/docker-compose.yml)**: Unified container deployment configuration.
 
 ---
 
-## 🚀 Installation and Setup
+## 🚀 Installation & Setup
 
-1. **Clone the Repository**
-   ```
-   git clone https://github.com/Ganesh-403/Railway-Management-System.git
-2. **Set Up the Database**
+### Option A: Using Docker (Recommended)
+Ensure Docker and Docker Compose are installed, then run the following in the project root:
+```bash
+docker-compose up --build
+```
+- **React Frontend**: `http://localhost` (Port 80)
+- **FastAPI Backend**: `http://localhost:8000`
+- **MySQL Database**: `http://localhost:3306`
 
-   - Import `Railway_database.sql` into your MySQL or SQLite environment.
-   - Ensure the connection details in `web.py` match your database setup.
+### Option B: Local Bare-Metal Setup
 
-3. **Run the Backend**
+#### 1. Setup the Database
+Ensure a local MySQL instance is running, create a database named `Railway`, and load the schema:
+```bash
+mysql -u root -p Railway < Railway_database.sql
+```
 
-   - Install the necessary Python libraries:
-     ```
-     pip install flask mysql-connector
-     ```
-   - Start the server:
-     ```
-     python web.py
-     ```
+#### 2. Start the Backend API
+Navigate to the `backend/` directory, set up your `.env` variables, and start the development server:
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+The API documentation will be available at `http://localhost:8000/docs`.
 
-4. **Access the Application**
-
-   - Open your browser and navigate to `http://localhost:5000`.
+#### 3. Start the Frontend client
+Navigate to the `frontend/` directory, install packages, and boot Vite:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173` in your browser.
 
 ---
 
 ## 📋 Requirements
-
-### Software
-- MySQL or SQLite for the database.
-- Python 3.8+ with Flask framework.
-
-### Dependencies
-- Flask
-- MySQL-Connector or SQLite3
-
----
-
-## 📸 Screenshots
-
-Include images/screenshots of your application for visual representation:
-- Home Page
-- Ticket Booking Page
-- Admin Dashboard
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to fork the repository and create a pull request with your changes.
+- **Database**: MySQL 8.0+
+- **Backend**: Python 3.10+ (FastAPI, SQLAlchemy, PyJWT, Cryptography, Pydantic, Bcrypt, PyMySQL, Alembic)
+- **Frontend**: Node.js 18+ (React, Vite, TailwindCSS, Lucide React, Recharts)
 
 ---
 
