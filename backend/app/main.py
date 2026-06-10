@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, time, date, timedelta
@@ -10,7 +11,7 @@ from . import models, schemas, auth, config
 
 app = FastAPI(title="Railway Management System API")
 
-# Configure CORS for communication with the React frontend
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,8 +20,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create tables if they do not exist
 Base.metadata.create_all(bind=engine)
+
+# --- JWT Auth Dependency ---
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    token = credentials.credentials
+    payload = auth.decode_access_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
+
+def get_current_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Admin privileges required"
+        )
+    return current_user
 
 
 # --- Helper Function for Emailing ---
@@ -50,12 +72,11 @@ def send_booking_email(recipient: str, body: str):
         print(f"Failed to send email to {recipient}: {e}")
 
 
-# --- Endpoints ---
+# --- Authentication Endpoints ---
 
 @app.get("/api/stations")
 def get_stations(db: Session = Depends(get_db)):
-    stations = db.query(models.Station).all()
-    return stations
+    return db.query(models.Station).all()
 
 
 @app.post("/api/check-username")
@@ -76,7 +97,6 @@ def register_user(
     step3: schemas.UserRegister3,
     db: Session = Depends(get_db)
 ):
-    # Check duplicate
     existing = db.query(models.Userdetails).filter(models.Userdetails.ID == step1.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -120,13 +140,15 @@ def login_user(payload: schemas.UserLogin, db: Session = Depends(get_db)):
     if not auth.verify_password(payload.password, user.Password):
         raise HTTPException(status_code=400, detail="Password incorrect")
 
+    token = auth.create_access_token({"sub": user.ID, "role": "user"})
     return {
         "status": "success",
         "user": {
             "username": user.ID,
             "email": user.Email,
             "firstName": user.Firstname,
-            "lastName": user.Lastname
+            "lastName": user.Lastname,
+            "token": token
         }
     }
 
@@ -137,22 +159,24 @@ def login_admin(payload: schemas.AdminLogin, db: Session = Depends(get_db)):
     if not admin:
         raise HTTPException(status_code=400, detail="Wrong credentials")
     
-    # Check legacy plain text / hashed pass
     if admin.Password != payload.password:
          raise HTTPException(status_code=400, detail="Password incorrect")
 
+    token = auth.create_access_token({"sub": admin.UserID, "role": "admin"})
     return {
         "status": "success",
-        "username": admin.UserID
+        "username": admin.UserID,
+        "token": token
     }
 
+
+# --- Train & Ticket Endpoints ---
 
 @app.post("/api/search")
 def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get_db)):
     start_code = payload.Startstation.split("-")[0]
     end_code = payload.Endstation.split("-")[0]
     
-    # Date processing to find weekday
     try:
         search_date = datetime.strptime(payload.Date, "%Y-%m-%d").date()
     except ValueError:
@@ -162,13 +186,9 @@ def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get
     weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     day_name = weekdays[weekday_idx]
 
-    # Find trains running on that day and passing through start and end stations
-    # SQL: Find trains with a route starting at start_code and ending at end_code
-    # Join Route starting and Route ending on the same train number
     start_routes = db.query(models.Route.Trainno).filter(models.Route.Deptstation == start_code).subquery()
     end_routes = db.query(models.Route.Trainno).filter(models.Route.Arrivalstation == end_code).subquery()
     
-    # Intersect train numbers
     common_trains_q = db.query(start_routes.c.Trainno).join(
         end_routes, start_routes.c.Trainno == end_routes.c.Trainno
     ).all()
@@ -176,7 +196,6 @@ def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get
 
     results = []
     for train_no in common_train_nos:
-        # Check if train runs on this weekday
         train = db.query(models.Traindetails).filter(
             models.Traindetails.Trainno == train_no,
             getattr(models.Traindetails, day_name) == True
@@ -184,7 +203,6 @@ def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get
         if not train:
             continue
 
-        # Get stop numbers
         start_route = db.query(models.Route).filter(models.Route.Trainno == train_no, models.Route.Deptstation == start_code).first()
         end_route = db.query(models.Route).filter(models.Route.Trainno == train_no, models.Route.Arrivalstation == end_code).first()
         
@@ -204,10 +222,8 @@ def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get
             ).first()
 
         if not avail:
-            # If no seat availability was released for this date yet
             continue
 
-        # Get routing IDs to aggregate segment prices
         route_ids_q = db.query(models.Route.RouteID).filter(
             models.Route.Trainno == train_no,
             models.Route.Stopnumber >= start_route.Stopnumber,
@@ -232,10 +248,19 @@ def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get
                 func.sum(models.Tatkalrouteprices.CCprice)
             ).filter(models.Tatkalrouteprices.RouteID.in_(r_ids)).first()
 
+        # Gather occupied seat numbers on this train segment for visual dashboard
+        occupied_seats_q = db.query(models.Ticket.Seat).filter(
+            models.Ticket.Trainno == train_no,
+            models.Ticket.Date == search_date,
+            models.Ticket.Status == "CNF"
+        ).all()
+        occupied_seats = [s[0] for s in occupied_seats_q]
+
         results.append({
             "trainno": train.Trainno,
             "trainname": train.Trainname,
             "date": str(search_date),
+            "occupied_seats": occupied_seats,
             "SL": {"seats": avail.SLseats, "wl": avail.SLWL, "price": prices[0] or 0},
             "AC3": {"seats": avail.AC3_seats, "wl": avail.AC3_WL, "price": prices[1] or 0},
             "AC2": {"seats": avail.AC2_seats, "wl": avail.AC2_WL, "price": prices[2] or 0},
@@ -250,44 +275,52 @@ def search_trains(payload: schemas.TrainSearchRequest, db: Session = Depends(get
 def book_ticket(
     trainno: int,
     price: int,
-    category: str,  # "SL", "3A", "2A", "1A", "CC"
-    seats: int,     # Current seats available
-    type: str,      # "General", "Tatkal"
+    category: str,
+    seats: int,
+    type: str,
     date: str,
     startstation: str,
     endstation: str,
     payload: schemas.TicketBookingRequest,
-    username: str,  # User ID
     background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    username = current_user.get("sub")
     try:
         travel_date = datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
-    # Fetch user details
+    if len(payload.seats) != payload.tickets:
+        raise HTTPException(status_code=400, detail="Selected seats length must match ticket count")
+
+    # Fetch details
     user = db.query(models.Userdetails).filter(models.Userdetails.ID == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Fetch train details
     train = db.query(models.Traindetails).filter(models.Traindetails.Trainno == trainno).first()
-    if not train:
-        raise HTTPException(status_code=404, detail="Train not found")
 
-    # Compute next PNR number
+    # Validate seat occupancy for selected numbers
+    for seat in payload.seats:
+        occupied = db.query(models.Ticket).filter(
+            models.Ticket.Trainno == trainno,
+            models.Ticket.Date == travel_date,
+            models.Ticket.Seat == seat,
+            models.Ticket.Status == "CNF"
+        ).first()
+        if occupied:
+            raise HTTPException(status_code=400, detail=f"Seat {seat} is already occupied.")
+
+    # Generate PNR
     max_pnr = db.query(func.max(models.Ticket.PNR)).scalar()
     pnr = (max_pnr or 0) + 1
 
-    # Base price calculation
+    # Base price
     total_price = price * payload.tickets
 
-    # Save passengers and generate seat allocation
+    # Add itemized catering menu surcharges
+    food_prices = {"Veg Thali": 120, "Non-Veg Thali": 150, "Snack Box": 40, "Beverage": 20}
+    
     passenger_ids = []
-    assigned_seats = []
-    current_avail_seats = seats
-
     for passenger in payload.passengers:
         p_detail = models.Passengerdetails(
             ID=username,
@@ -301,10 +334,12 @@ def book_ticket(
         db.refresh(p_detail)
         
         passenger_ids.append(p_detail.PassengerID)
-        assigned_seats.append(current_avail_seats)
-        current_avail_seats -= 1
+        
+        # Add food surcharge
+        if passenger.foodtype in food_prices:
+            total_price += food_prices[passenger.foodtype]
 
-    # Route timings and day details for food computation
+    # Query route timing
     routes = db.query(models.Route).filter(
         models.Route.Trainno == trainno,
         models.Route.Deptstation.in_([startstation, endstation]) | 
@@ -312,20 +347,15 @@ def book_ticket(
     ).all()
 
     depttime_raw = time(0, 0, 0)
-    deptday = 1
     arrivaltime_raw = time(0, 0, 0)
-    arrivalday = 1
 
-    # Securely retrieve departure and arrival details
     start_route = next((r for r in routes if r.Deptstation == startstation), None)
     end_route = next((r for r in routes if r.Arrivalstation == endstation), None)
 
     if start_route:
         depttime_raw = start_route.Depttime
-        deptday = start_route.Deptday
     if end_route:
         arrivaltime_raw = end_route.Arrivaltime
-        arrivalday = end_route.Arrivalday
 
     def to_time(t):
         if isinstance(t, time):
@@ -337,53 +367,7 @@ def book_ticket(
     depttime = to_time(depttime_raw)
     arrivaltime = to_time(arrivaltime_raw)
 
-    # Food pricing calculation
-    train_cat = db.query(models.Traincategory).filter(models.Traincategory.Category == train.Traincategory).first()
-    foodtype_serv = train_cat.Foodservicetype if train_cat else "Normal"
-    food_serv = db.query(models.Foodservice).filter(models.Foodservice.Foodservicetype == foodtype_serv).first()
-
-    if food_serv:
-        bf = time(hour=8, minute=30)
-        lunch = time(hour=13, minute=0)
-        snack = time(hour=17, minute=0)
-        dinner = time(hour=20, minute=30)
-
-        for passenger in payload.passengers:
-            if passenger.foodtype in ["Veg", "NVeg"]:
-                fp = 0
-                if passenger.foodtype == "Veg":
-                    f_bf, f_lh, f_sk, f_dn = food_serv.BVegprice, food_serv.LVegprice, food_serv.Snacks, food_serv.DVegprice
-                else:
-                    f_bf, f_lh, f_sk, f_dn = food_serv.BNVegprice, food_serv.LNVegprice, food_serv.Snacks, food_serv.DNVegprice
-
-                if deptday == arrivalday:
-                    if depttime < bf and arrivaltime > bf: fp += f_bf
-                    if depttime < lunch and arrivaltime > lunch: fp += f_lh
-                    if depttime < snack and arrivaltime > snack: fp += f_sk
-                    if depttime < dinner and arrivaltime > dinner: fp += f_dn
-                elif deptday == arrivalday - 1:
-                    if depttime < bf: fp += f_bf
-                    if depttime < lunch: fp += f_lh
-                    if depttime < snack: fp += f_sk
-                    if depttime < dinner: fp += f_dn
-                    if arrivaltime > bf: fp += f_bf
-                    if arrivaltime > lunch: fp += f_lh
-                    if arrivaltime > snack: fp += f_sk
-                    if arrivaltime > dinner: fp += f_dn
-                elif deptday <= arrivalday - 2:
-                    fp += f_bf + f_lh + f_sk + f_dn
-                    if depttime < bf: fp += f_bf
-                    if depttime < lunch: fp += f_lh
-                    if depttime < snack: fp += f_sk
-                    if depttime < dinner: fp += f_dn
-                    if arrivaltime > bf: fp += f_bf
-                    if arrivaltime > lunch: fp += f_lh
-                    if arrivaltime > snack: fp += f_sk
-                    if arrivaltime > dinner: fp += f_dn
-                
-                total_price += fp
-
-    # Update available seats in DB
+    # Decrement available seats in db
     if type == "General":
         avail_table = models.Generalseatavailability
     else:
@@ -393,13 +377,20 @@ def book_ticket(
         "CC": "CCseats", "3A": "AC3_seats", "2A": "AC2_seats", "1A": "AC1_seats", "SL": "SLseats"
     }.get(category, "SLseats")
 
+    # Fetch current and subtract
+    avail = db.query(avail_table).filter(
+        avail_table.Trainno == trainno,
+        avail_table.Date == travel_date
+    ).first()
+    new_avail = max(0, (getattr(avail, col_name) if avail else seats) - payload.tickets)
+
     db.query(avail_table).filter(
         avail_table.Trainno == trainno,
         avail_table.Date == travel_date
-    ).update({col_name: current_avail_seats})
+    ).update({col_name: new_avail})
     db.commit()
 
-    # Create Ticket rows
+    # Create Tickets
     for i in range(payload.tickets):
         ticket = models.Ticket(
             PNR=pnr,
@@ -409,7 +400,7 @@ def book_ticket(
             Bookingtype=type,
             Trainno=trainno,
             Status="CNF",
-            Seat=assigned_seats[i],
+            Seat=payload.seats[i],
             Boarding=startstation,
             Boardingtime=depttime,
             Destination=endstation,
@@ -420,8 +411,7 @@ def book_ticket(
         db.add(ticket)
     db.commit()
 
-    # Async email trigger
-    msg_body = f"Hello {user.Firstname},\n\nThis is confirmation of your booking.\n\nPNR: {pnr}\nTrain No: {trainno}\nTrain Name: {train.Trainname}\nJourney Date: {date}\nNo of tickets: {payload.tickets}\nTotal Price: INR {total_price}\nFrom: {startstation} To: {endstation}\nStatus: Confirmed\n\nThank you for choosing RailExp!"
+    msg_body = f"Hello {user.Firstname},\n\nThis is confirmation of your RailExp booking.\n\nPNR: {pnr}\nTrain: {train.Trainname} ({trainno})\nDate: {date}\nClass: {category}\nSelected Seats: {payload.seats}\nTotal Price: INR {total_price}\nFrom: {startstation} To: {endstation}\nStatus: Confirmed\n\nEnjoy your journey!"
     background_tasks.add_task(send_booking_email, user.Email, msg_body)
 
     return {
@@ -432,7 +422,7 @@ def book_ticket(
         "total_price": total_price,
         "start": startstation,
         "end": endstation,
-        "seats": assigned_seats
+        "seats": payload.seats
     }
 
 
@@ -471,7 +461,12 @@ def get_pnr_status(payload: schemas.PNRStatusRequest, db: Session = Depends(get_
 
 
 @app.post("/api/cancel")
-def cancel_ticket(payload: schemas.PNRStatusRequest, username: str, db: Session = Depends(get_db)):
+def cancel_ticket(
+    payload: schemas.PNRStatusRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    username = current_user.get("sub")
     tickets = db.query(models.Ticket).filter(models.Ticket.PNR == payload.PNR).all()
     if not tickets:
         raise HTTPException(status_code=404, detail="PNR not found")
@@ -486,21 +481,20 @@ def cancel_ticket(payload: schemas.PNRStatusRequest, username: str, db: Session 
     if t0.Status == "CXL":
         return {"status": "success", "message": "Ticket is already cancelled"}
 
-    # Update tickets to cancelled
+    # Update status
     db.query(models.Ticket).filter(models.Ticket.PNR == payload.PNR).update({models.Ticket.Status: "CXL"})
 
-    # Increment available seats
     category = t0.Category
     trainno = t0.Trainno
     travel_date = t0.Date
     n_seats = len(tickets)
 
+    # Reclaim seats in db
     avail_table = models.Generalseatavailability
     col_name = {
         "CC": "CCseats", "3A": "AC3_seats", "2A": "AC2_seats", "1A": "AC1_seats", "SL": "SLseats"
     }.get(category, "SLseats")
 
-    # Fetch current seats and increment
     avail = db.query(avail_table).filter(
         avail_table.Trainno == trainno,
         avail_table.Date == travel_date
@@ -544,14 +538,12 @@ def check_running_status(payload: schemas.RunningStatusRequest, db: Session = De
     difference = delta.days
 
     if date_now == query_date:
-        # Same day check
         first_stop = db.query(models.Route).filter(models.Route.Trainno == train.Trainno, models.Route.Stopnumber == 1).first()
         if not first_stop:
             return {"status": "error", "message": "Route details not found."}
 
         time1 = first_stop.Depttime
         
-        # Get crossed station
         z = db.query(models.Route).filter(
             models.Route.Trainno == train.Trainno,
             models.Route.Depttime <= time_now,
@@ -559,13 +551,11 @@ def check_running_status(payload: schemas.RunningStatusRequest, db: Session = De
             models.Route.Depttime >= time1
         ).first()
 
-        # Check future departure
         y = db.query(models.Traindetails).filter(
             models.Traindetails.Trainno == train.Trainno,
             models.Traindetails.Starttime > time_now
         ).first()
 
-        # Check past journey
         x = db.query(models.Traindetails).filter(
             models.Traindetails.Trainno == train.Trainno,
             models.Traindetails.Endtime < time_now
@@ -586,7 +576,6 @@ def check_running_status(payload: schemas.RunningStatusRequest, db: Session = De
             return {"status": "unknown", "message": "Status unknown for current time context."}
 
     elif date_now > query_date:
-        # Passed date check
         z = db.query(models.Route).filter(
             models.Route.Trainno == train.Trainno,
             models.Route.Depttime <= time_now,
@@ -606,15 +595,17 @@ def check_running_status(payload: schemas.RunningStatusRequest, db: Session = De
             return {"status": "completed", "message": "Train completed its journey."}
             
     else:
-        # Future date check
         return {"status": "future", "message": "The day didn't arrive."}
 
+
+# --- Admin Protected Operations ---
 
 @app.post("/api/admin/release")
 def admin_release_seats(
     trainno: int,
     date_str: str,
-    type: str,  # "General", "Tatkal"
+    type: str,
+    current_admin: dict = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
     try:
@@ -626,7 +617,6 @@ def admin_release_seats(
     weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     day_name = weekdays[weekday_idx]
 
-    # Verify if train operates on this day
     train = db.query(models.Traindetails).filter(
         models.Traindetails.Trainno == trainno,
         getattr(models.Traindetails, day_name) == True
@@ -635,7 +625,6 @@ def admin_release_seats(
     if not train:
         raise HTTPException(status_code=400, detail="Train doesn't run on this day")
 
-    # Select seed seats from template date 2021-10-24 (which is standard seed in legacy schema)
     seed_date = datetime.strptime("2021:10:24", "%Y:%m:%d").date()
     
     if type == "General":
@@ -651,8 +640,6 @@ def admin_release_seats(
     if not seed_seats:
         raise HTTPException(status_code=404, detail="Seed seat templates not found for this train")
 
-    # Insert new seat records for target date
-    # Delete existing if any to avoid duplicates
     db.query(avail_table).filter(
         avail_table.Trainno == trainno,
         avail_table.Date == target_date
@@ -688,3 +675,172 @@ def admin_release_seats(
 
     db.commit()
     return {"status": "success", "message": f"Successfully released {type} tickets"}
+
+
+@app.get("/api/admin/analytics")
+def get_admin_analytics(
+    current_admin: dict = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    # Daily Revenue
+    revenue_data = db.query(
+        models.Ticket.Date,
+        func.sum(models.Ticket.Price)
+    ).filter(models.Ticket.Status != "CXL").group_by(models.Ticket.Date).order_by(models.Ticket.Date).all()
+    revenue_timeline = [{"date": str(r[0]), "revenue": r[1]} for r in revenue_data]
+
+    # Booking counts per train
+    train_data = db.query(
+        models.Ticket.Trainno,
+        func.count(models.Ticket.PNR)
+    ).filter(models.Ticket.Status != "CXL").group_by(models.Ticket.Trainno).all()
+    train_bookings = [{"train": f"Train {t[0]}", "bookings": t[1]} for t in train_data]
+
+    # Booking quota distribution
+    quota_data = db.query(
+        models.Ticket.Bookingtype,
+        func.count(models.Ticket.PNR)
+    ).filter(models.Ticket.Status != "CXL").group_by(models.Ticket.Bookingtype).all()
+    quota_breakdown = [{"name": q[0], "value": q[1]} for q in quota_data]
+
+    # Dining distribution
+    dining_data = db.query(
+        models.Passengerdetails.Foodtype,
+        func.count(models.Passengerdetails.PassengerID)
+    ).group_by(models.Passengerdetails.Foodtype).all()
+    dining_breakdown = [{"name": d[0], "value": d[1]} for d in dining_data]
+
+    return {
+        "revenue": revenue_timeline,
+        "trains": train_bookings,
+        "quotas": quota_breakdown,
+        "dining": dining_breakdown
+    }
+
+
+# --- Admin CRUD Operations ---
+
+@app.get("/api/admin/trains")
+def admin_get_trains(
+    current_admin: dict = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    return db.query(models.Traindetails).all()
+
+
+@app.post("/api/admin/trains")
+def admin_create_train(
+    payload: schemas.TrainCreate,
+    current_admin: dict = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    existing = db.query(models.Traindetails).filter(models.Traindetails.Trainno == payload.Trainno).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Train number already exists")
+
+    # Time parsing
+    try:
+        stime = datetime.strptime(payload.Starttime, "%H:%M:%S").time()
+        etime = datetime.strptime(payload.Endtime, "%H:%M:%S").time()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Times must be in HH:MM:SS format")
+
+    train = models.Traindetails(
+        Trainno=payload.Trainno,
+        Trainname=payload.Trainname,
+        Traincategory=payload.Traincategory,
+        Startstation=payload.Startstation,
+        Starttime=stime,
+        Endstation=payload.Endstation,
+        Endtime=etime,
+        Totalhalts=payload.Totalhalts,
+        Monday=payload.Monday,
+        Tuesday=payload.Tuesday,
+        Wednesday=payload.Wednesday,
+        Thursday=payload.Thursday,
+        Friday=payload.Friday,
+        Saturday=payload.Saturday,
+        Sunday=payload.Sunday
+    )
+    db.add(train)
+    db.commit()
+    return {"status": "success", "message": "Train created successfully"}
+
+
+@app.put("/api/admin/trains/{trainno}")
+def admin_update_train(
+    trainno: int,
+    payload: schemas.TrainCreate,
+    current_admin: dict = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    train = db.query(models.Traindetails).filter(models.Traindetails.Trainno == trainno).first()
+    if not train:
+        raise HTTPException(status_code=404, detail="Train not found")
+
+    try:
+        stime = datetime.strptime(payload.Starttime, "%H:%M:%S").time()
+        etime = datetime.strptime(payload.Endtime, "%H:%M:%S").time()
+    except ValueError:
+         raise HTTPException(status_code=400, detail="Times must be in HH:MM:SS format")
+
+    train.Trainname = payload.Trainname
+    train.Traincategory = payload.Traincategory
+    train.Startstation = payload.Startstation
+    train.Starttime = stime
+    train.Endstation = payload.Endstation
+    train.Endtime = etime
+    train.Totalhalts = payload.Totalhalts
+    train.Monday = payload.Monday
+    train.Tuesday = payload.Tuesday
+    train.Wednesday = payload.Wednesday
+    train.Thursday = payload.Thursday
+    train.Friday = payload.Friday
+    train.Saturday = payload.Saturday
+    train.Sunday = payload.Sunday
+
+    db.commit()
+    return {"status": "success", "message": "Train updated successfully"}
+
+
+@app.delete("/api/admin/trains/{trainno}")
+def admin_delete_train(
+    trainno: int,
+    current_admin: dict = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    train = db.query(models.Traindetails).filter(models.Traindetails.Trainno == trainno).first()
+    if not train:
+        raise HTTPException(status_code=404, detail="Train not found")
+
+    db.delete(train)
+    db.commit()
+    return {"status": "success", "message": "Train deleted successfully"}
+
+
+@app.post("/api/admin/routes")
+def admin_create_route(
+    payload: schemas.RouteCreate,
+    current_admin: dict = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    try:
+        dtime = datetime.strptime(payload.Depttime, "%H:%M:%S").time()
+        atime = datetime.strptime(payload.Arrivaltime, "%H:%M:%S").time()
+    except ValueError:
+         raise HTTPException(status_code=400, detail="Times must be in HH:MM:SS format")
+
+    route_stop = models.Route(
+        RouteID=payload.RouteID,
+        Trainno=payload.Trainno,
+        Deptstation=payload.Deptstation,
+        Depttime=dtime,
+        Deptday=payload.Deptday,
+        Arrivalstation=payload.Arrivalstation,
+        Arrivaltime=atime,
+        Arrivalday=payload.Arrivalday,
+        Stopnumber=payload.Stopnumber
+    )
+    db.add(route_stop)
+    db.commit()
+    return {"status": "success", "message": "Route stop created successfully"}

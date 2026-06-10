@@ -26,8 +26,9 @@ export default function AdminLogin({ setView, setAdmin }) {
       }
 
       if (data.status === "success") {
-        localStorage.setItem("rail_admin", data.username);
-        setAdmin(data.username);
+        const adminObj = { username: data.username, token: data.token };
+        localStorage.setItem("rail_admin", JSON.stringify(adminObj));
+        setAdmin(adminObj);
         setView("adminrights");
       }
     } catch (err) {

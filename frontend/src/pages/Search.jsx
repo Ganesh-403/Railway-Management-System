@@ -88,7 +88,8 @@ export default function Search({ setView, navigateToBooking, user }) {
       type: category,
       date: train.date,
       startstation: startStation.split("-")[0],
-      endstation: endStation.split("-")[0]
+      endstation: endStation.split("-")[0],
+      occupied_seats: train.occupied_seats || []
     });
   };
 

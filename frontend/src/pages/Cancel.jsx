@@ -47,9 +47,12 @@ export default function Cancel({ setView, user }) {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/cancel?username=${user.username}`, {
+      const res = await fetch(`${API_BASE}/api/cancel`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${user.token}`
+        },
         body: JSON.stringify({ PNR: ticketInfo.pnr })
       });
       const data = await res.json();

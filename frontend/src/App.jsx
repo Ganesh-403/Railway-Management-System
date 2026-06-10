@@ -31,7 +31,11 @@ export default function App() {
     }
     const storedAdmin = localStorage.getItem("rail_admin");
     if (storedAdmin) {
-      setAdmin(storedAdmin);
+      try {
+        setAdmin(JSON.parse(storedAdmin));
+      } catch (e) {
+        setAdmin({ username: storedAdmin, token: "" });
+      }
     }
   }, []);
 
@@ -122,7 +126,7 @@ export default function App() {
             {admin ? (
               <div className="flex items-center gap-3">
                 <span className="text-xs text-rose-400 bg-rose-950/40 px-2.5 py-1 rounded-full border border-rose-800/40 flex items-center gap-1">
-                  <ShieldAlert size={12} /> Admin: {admin}
+                  <ShieldAlert size={12} /> Admin: {admin.username}
                 </span>
                 <button onClick={() => setView("adminrights")} className="text-sm font-semibold hover:text-amber-500 transition-colors">Dashboard</button>
                 <button 

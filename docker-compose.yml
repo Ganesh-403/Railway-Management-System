@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: railexp_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: Ganesh@123
+      MYSQL_DATABASE: Railway
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: railexp_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=mysql+pymysql://root:Ganesh%40123@db:3306/Railway
+      - SECRET_KEY=super-secret-key-for-development
+      - MAIL_USERNAME=chsiddu2002@gmail.com
+      - MAIL_PASSWORD=****
+      - MAIL_FROM=chsiddu2002@gmail.com
+      - MAIL_PORT=465
+      - MAIL_SERVER=smtp.gmail.com
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: railexp_frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
