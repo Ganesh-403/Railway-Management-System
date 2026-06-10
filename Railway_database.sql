@@ -216,7 +216,7 @@ Create Table Tatkalseatavailability(
 Insert into Foodservice values ("Special",1,60,80,180,200,50,230,250);
 Insert into Foodservice values ("Normal",0,40,50,80,100,30,100,120);
 
-Insert into admin values ("Ram",1234);
+Insert into Admin values ("Ram",1234);
 
 Insert into Station values ("BCT","Mumbai Central");
 Insert into Station values ("BVI","Borivali");
