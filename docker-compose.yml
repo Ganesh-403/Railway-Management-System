@@ -7,9 +7,10 @@ services:
       MYSQL_ROOT_PASSWORD: Ganesh@123
       MYSQL_DATABASE: Railway
     ports:
-      - "3306:3306"
+      - "3308:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./Railway_database.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
@@ -23,7 +24,7 @@ services:
     container_name: railexp_backend
     restart: always
     ports:
-      - "8000:8000"
+      - "8081:8000"
     environment:
       - DATABASE_URL=mysql+pymysql://root:Ganesh%40123@db:3306/Railway
       - SECRET_KEY=super-secret-key-for-development
@@ -43,7 +44,7 @@ services:
     container_name: railexp_frontend
     restart: always
     ports:
-      - "80:80"
+      - "8080:80"
     depends_on:
       - backend
 

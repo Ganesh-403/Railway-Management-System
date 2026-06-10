@@ -201,9 +201,9 @@ Make sure **Docker Desktop** is running, then execute:
 ```bash
 docker-compose up --build
 ```
-* **React Frontend**: [http://localhost](http://localhost) (Port 80)
-* **FastAPI Backend**: [http://localhost:8000](http://localhost:8000)
-* **MySQL Database**: `localhost:3306`
+* **React Frontend**: [http://localhost:8080](http://localhost:8080) (Port 8080)
+* **FastAPI Backend**: [http://localhost:8081](http://localhost:8081) (Port 8081)
+* **MySQL Database**: `localhost:3308`
 
 ---
 
